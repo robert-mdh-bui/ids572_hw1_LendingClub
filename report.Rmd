@@ -1,0 +1,233 @@
+---
+title: "Scratch"
+author: "Robert Duc Bui"
+date: "9/16/2021"
+output: html_document
+---
+
+# Homework 1
+
+## Part A
+
+### Q. 1
+
+Describe the business model for online lending platforms like Lending Club. Consider the stakeholders and their roles, and what advantages Lending Club offers. What is the attraction for investors? How does the platform make money? (Not more than 1.5 pages, single spaced, 11 pt font. [Please cite your sources]{.ul}).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggridges)
+library(patchwork)
+library(lubridate)
+
+lend_data <- read_csv("lcData100K/lcData100K.csv")
+```
+
+
+### Q. 2
+
+#### (a)
+#####(i)
+
+Out of all instances, 13.79% defaulted on their loan, while 86.21% fully paid off.
+
+```{r}
+lend_data %>% 
+  group_by(loan_status) %>% 
+  summarise(n=n()) %>% 
+  mutate(proportion = n/sum(n)) %>% 
+  tibble()
+```
+
+When grouped by loan grade, we see the following distribution. As we go from more prime loan grades to lower subprimes, the default rate increases. This is expected, as higher grade applicants are assigned that grade due to their higher credit strength, strength of collateral, etc. which are all known to be associated with a lower risk profile and higher likelihood of repayment.
+
+```{r}
+lend_data %>% 
+  group_by(grade,loan_status) %>% 
+  summarise(n=n()) %>% 
+  mutate(
+    n_size = sum(n),
+    proportion = n/sum(n)
+  ) %>% 
+  arrange(grade) %>% 
+  select(grade,loan_status,n_size,proportion) %>% 
+  ggplot(
+    aes(
+      x = reorder(grade,desc(grade)),
+      y = proportion,
+      fill = loan_status
+    )
+  )+
+  geom_col(position = "stack")+
+  coord_flip()+
+  theme_minimal()
+```
+
+When broken down to sub-grade levels, we find that the aforementioned behaviour holds at most levels down to E5. At levels below E, the trend becomes a lot more erratic and less conformant to our expectations given conventional knowledge on credit risk management. We can surmise that this is a corollary of the Central Limit Theorem, in the sense that the more erratic trend that lower subgrade levels exhibit are due to their smaller sample sizes (which we will see in the following section).
+
+```{r}
+lend_data %>% 
+  group_by(sub_grade,loan_status) %>% 
+  summarise(n=n()) %>% 
+  mutate(
+    n_size = sum(n),
+    proportion = n/sum(n)
+  ) %>% 
+  arrange(sub_grade) %>% 
+  select(sub_grade,loan_status,n_size,proportion) %>% 
+  ggplot(
+    aes(
+      x = reorder(sub_grade,desc(sub_grade))
+    )
+  )+
+  geom_col(
+    aes(
+      y = proportion,
+      fill = loan_status
+    ),
+    width=1,
+    position = "stack"
+  )+
+  coord_flip()+
+  labs(x = "Loan Sub-grade",
+       fill = "Loan Status")+
+  theme_minimal()
+```
+
+##### (ii)
+
+The number of loans in each grade can be found below. As predicted in the previous section, there are relatively very few applications assigned lower credit risk grades under D.
+
+```{r}
+lend_data %>% 
+  group_by(grade) %>% 
+  summarise(n=n())
+```
+Loan amounts do vary by grade - within the vast majority of above-subprime grade loans (grade A to D), the lower the grade, the lower the median loan amount. There is somewhat of a higher kurtosis at lower grades, but we suspect this is only due to the sample size issue.
+
+```{r}
+lend_data %>% 
+  select(grade,loan_amnt) %>% 
+  ggplot()+
+  geom_density_ridges(
+    aes(
+      x = loan_amnt,
+      y = reorder(grade,desc(grade))
+    ),
+    alpha = .5,
+    quantile_lines = T,
+    quantiles = 2,
+    scale = 2
+  )+
+  labs(
+    title = "Distribution of Loan Amounts by Credit Risk Grade w/ Median Line",
+    y = "Credit Risk Grade",
+    x = "Loan Amount"
+  )
+```
+On average, rates decrease as we go up the grades, as expected. Interestingly, the lowest rate possible stays around the 5-6% range from grade A all the way to E - and rises drastically once we go down to F and G grades.
+
+```{r}
+lend_data %>% 
+  select(grade,int_rate) %>% 
+  group_by(grade) %>% 
+  summarise(
+    n_size  = n(),
+    Average = int_rate %>% mean(),
+    StD     = int_rate %>% sd(),
+    min     = int_rate %>% min(),
+    max     = int_rate %>% max()
+  )
+```
+Broken down more granularly to sub-grade levels, the same trends listed above are observed: average rates rise as grades fall, and the lowest attainable rate is relatively stable around the 5.3-6.5% from A to D, with some exceptions. Maximum rates, however, rise consistently as we go down the credit risk grades. 
+
+While conventional risk management knowledge and common sense can explain the trends in average and maximum APR, we do not yet understand the availability of 6% APR (a very respectable loan interest rate) all the way down to D and E grade applicants. 
+
+```{r}
+lend_data %>% 
+  select(sub_grade,int_rate) %>% 
+  group_by(sub_grade) %>% 
+  summarise(
+    n_size  = n(),
+    Average = int_rate %>% mean(),
+    StD     = int_rate %>% sd(),
+    min     = int_rate %>% min(),
+    max     = int_rate %>% max()
+  )
+```
+
+##### (iii)
+
+```{r}
+lend_data %>% 
+  filter(loan_status == "Fully Paid") %>% 
+  select(grade,last_pymnt_d,issue_d) %>% 
+  transmute(
+    grade   = grade,
+    last    = paste(last_pymnt_d,"-01",sep="") %>% myd(),# Day missing - assigning 01. Parse w/ lubridate.
+    first   = ymd(issue_d),                              # Parse w/ lubridate.
+    actual  = interval(first, last) %/% months(1),       # Interval length converted to 30-day months
+  ) %>% 
+  ggplot(
+    aes(
+      x = grade, 
+      y = actual
+    )
+  )+
+  geom_boxplot()
+  
+```
+
+##### (iv)
+
+Calculating annual return:
+```{r}
+lend_data
+```
+
+
+```{r}
+short_df <- lend_data %>% 
+  transmute(
+    grade  = grade,
+    status = loan_status,
+    last_d = paste(last_pymnt_d,"-01",sep="") %>% myd(),
+    frst_d = ymd(issue_d),
+    actual = interval(frst_d, last_d) %/% months(1),
+    funded = funded_amnt,
+    repaid = total_pymnt
+  )
+  
+short_df
+```
+```{r}
+total_funded = sum(short_df$funded)
+total_repaid = sum(short_df$repaid)
+
+firstFY <- short_df$frst_d %>% 
+  min(na.rm = TRUE) %>% 
+  year()
+
+lastFY <- short_df$last_d %>% 
+  max(na.rm = TRUE) %>% 
+  year()+1
+
+t = lastFY - firstFY
+
+r = ((total_repaid/total_funded)-1)/t
+print(r*100)
+```
+
+
+##### (v)
+##### (vi)
+##### (vii)
+
+#### (b)
+#### (c)
+
+### Q. 3
+### Q. 4
