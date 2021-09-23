@@ -22,6 +22,9 @@ library(tidyverse)
 library(ggridges)
 library(patchwork)
 library(lubridate)
+library(skimr)
+
+options(scipen=999999)
 
 lend_data <- read_csv("lcData100K/lcData100K.csv")
 ```
@@ -161,8 +164,19 @@ lend_data %>%
 
 ##### (iii)
 
+Note that across the entire dataset, the (theoretical) amortisation schedule for all loans are fixed at 36 months.
+
 ```{r}
 lend_data %>% 
+  group_by(term) %>% 
+  summarise()         # Display all unique occurrences in column `term`.
+```
+
+
+Using variables for the month of loan issuance and month of last payment, we can derive the actual length of the loans, converted to month unit. Here we create both a Tukey-style boxplot and a density ridgeline plot to observe the shape of the distribution.
+
+```{r}
+fully_paid <- lend_data %>% 
   filter(loan_status == "Fully Paid") %>% 
   select(grade,last_pymnt_d,issue_d) %>% 
   transmute(
@@ -170,25 +184,89 @@ lend_data %>%
     last    = paste(last_pymnt_d,"-01",sep="") %>% myd(),# Day missing - assigning 01. Parse w/ lubridate.
     first   = ymd(issue_d),                              # Parse w/ lubridate.
     actual  = interval(first, last) %/% months(1),       # Interval length converted to 30-day months
-  ) %>% 
+  ) 
+
+fully_paid_tukey <- fully_paid %>% 
   ggplot(
     aes(
-      x = grade, 
+      x = reorder(grade,desc(grade)), 
       y = actual
     )
   )+
-  geom_boxplot()
+  geom_boxplot()+
+  coord_flip()+
+  lims(y = c(0,50))+
+  labs(x = "Loan Grade",
+       y = "Actual Term (months)")
   
+
+fully_paid_ridgeline <- fully_paid %>% 
+  ggplot(
+    aes(
+      y = reorder(grade,desc(grade)), 
+      x = actual
+    )
+  )+
+  geom_density_ridges(alpha=.5,
+                      quantile_lines = T,
+                      quantiles = 4)+
+  lims(x = c(0,50))+
+  labs(y = "Loan Grade",
+       y = "Actual Term (months)")
 ```
+
+Interestingly enough, the actual term (among fully repaid loans) do not differ drastically between loan grades. The median and first-quartile line (Q1) for actual loan term gently decrease from grade A to E, with F and G having a fair bit more variance, once again likely due to the much smaller sample size. Interestingly, the third-quartile line (Q3) lines up almost perfectly at 36-month for all loan grades - and this is also where all the peaks are in the density plots grade-wise. We surmise that this is due to the fact that 36-month loan terms are highly common for loans at this level.
+
+```{r}
+fully_paid_tukey | fully_paid_ridgeline
+```
+
+```{r}
+unpaid <- lend_data %>% 
+  filter(loan_status == "Charged Off") %>% 
+  select(grade,last_pymnt_d,issue_d) %>% 
+  transmute(
+    grade   = grade,
+    last    = paste(last_pymnt_d,"-01",sep="") %>% myd(),# Day missing - assigning 01. Parse w/ lubridate.
+    first   = ymd(issue_d),                              # Parse w/ lubridate.
+    actual  = interval(first, last) %/% months(1),       # Interval length converted to 30-day months
+  ) 
+
+default_tukey <- fully_paid %>% 
+  ggplot(
+    aes(
+      x = reorder(grade,desc(grade)), 
+      y = actual
+    )
+  )+
+  geom_boxplot()+
+  coord_flip()+
+  lims(y = c(0,50))+
+  labs(x = "Loan Grade",
+       y = "Actual Term (months)")
+  
+
+default_ridgeline <- fully_paid %>% 
+  ggplot(
+    aes(
+      y = reorder(grade,desc(grade)), 
+      x = actual
+    )
+  )+
+  geom_density_ridges(alpha=.5,
+                      quantile_lines = T,
+                      quantiles = 4)+
+  lims(x = c(0,50))+
+  labs(y = "Loan Grade",
+       y = "Actual Term (months)")
+
+default_tukey | default_ridgeline
+```
+
 
 ##### (iv)
 
-Calculating annual return:
-```{r}
-lend_data
-```
-
-
+To begin calculating annual return, first we create a shorter data table for ease of comprehension.
 ```{r}
 short_df <- lend_data %>% 
   transmute(
@@ -203,28 +281,487 @@ short_df <- lend_data %>%
   
 short_df
 ```
+
+From this data, now we can calculate the total rate of return. Before we begin any data work however, we must clarify some terms that will be used in the following section. In a loan, there is the liquidity provider (here LC and its investors), and the borrowers. While the borrower's APR (Annual Percentage Rate) is defined as a ratio of simple interest over principal, the loan provider's APY (Annual Percentage Yield) is defined as a compounded interest over the initial principal amount. As our analysis is from LC and its investors' perspective, APY is the more salient metric here - though the APR is still easily derivable from our data when necessary. Monthly rate of return will also be based on the APY compounded calculation.
+
+First we aggregate the amount funded by LC and the total amount repaid by summing up the respective columns in the data frame.
 ```{r}
 total_funded = sum(short_df$funded)
 total_repaid = sum(short_df$repaid)
 
+paste("Total funded by LC: ",total_funded,
+      "Total repaid to LC: ",total_repaid,
+      sep="\n") %>% 
+  cat()
+```
+
+Next, we need a time frame. There are two ways we can carry out this calculation: either we can look at the problem from LC's perspective as a business, and roughly calculate the interval of the lending service by taking the `min()` of the loan issuance column, converting it to a FY with `lubridate::year()` - and similarly converting the `max()` of last payment. In other words, we evaluate the return throughout the entire period in which the dataset is active (ie. ~ 7 years)
+
+An alternative way to calculate the time frame is by naively taking the theoretical 36-month (3-year) interval that all borrowers in this data set falls under. 
+
+```{r} 
+lend_data %>% group_by(term) %>% summarise()
+```
+
+As we are looking at this problem from the business' perspective, we opt to go with the former method of evaluation - taking the entire time frame in which the data set is active as the accrual period.
+
+```{r}
 firstFY <- short_df$frst_d %>% 
   min(na.rm = TRUE) %>% 
   year()
 
 lastFY <- short_df$last_d %>% 
   max(na.rm = TRUE) %>% 
-  year()+1
+  year()
 
+cat(firstFY,lastFY,sep="\n")
+```
+
+As conventional for financial accounting, we have to take into account that the accrual value calculation has to be carried out at the end of the last year of calculation period. Thus assuming that the annuity period starts at the beginning of the first fiscal year, then `t` would equal:
+```{r}
 t = lastFY - firstFY
+```
 
-r = ((total_repaid/total_funded)-1)/t
-print(r*100)
+Recall the basic function for calculating accrued returns based on principal, interest rate, and interval:
+
+$$A=P(1+r)^t$$
+We can derive the interest rate as:
+$$r=(\frac{A}{P})^\frac{1}{t}-1$$
+We calculate this in R as:
+```{r}
+r = (total_repaid/total_funded)^(1/t)-1
+
+paste("The nominal APY from ",firstFY," to ",lastFY, " is ",r*100,"%",sep="")
+```
+
+When grouped by `loan_status`, we can see that the total amount issued for clients who ended up defaulting is greater than the amount recouped - which is expected. Of course, these clients often were able to make payments up to the point of default, and thus the issued funds are not entirely lost - just not recouped in its entirety. 
+
+For informational purposes, the nominal APY for each group is calculated as below - LC funding loses 6.22% YoY for defaulted clients, and makes 2.02% YoY on clients who pay off their loans.
+
+```{r}
+lend_data %>% 
+  group_by(loan_status) %>% 
+  summarise(
+    total_issued    = sum(funded_amnt),
+    total_recoup    = sum(total_pymnt),
+    `simple_diff%`  = (total_recoup/total_issued-1)*100,
+    # APY%_1319 uses the time interval of the whole dataset, ie. throughout LendingClub's entire venture as a P2P lender.
+    `APY%_1319`     = ((total_recoup/total_issued)^(1/t)-1)*100,
+    # APY%_36m uses a 36-month time interval, which is the standard loan term for all loans in the dataset.
+    `APY%_36m`      = ((total_recoup/total_issued)^(1/3)-1)*100
+  )
+```
+
+When taking credit risk grade into account, the percentage loss generally increases as grade decreases - as expected, subprime accounts tend to be able to pay back less of their loaned amount. Interestingly, in percentage terms, LC loses less money on defaulted B-grade loans than it does on defaulted A-grade loans - albeit by a very small margin, and we are not sure why this is the case.
+
+```{r}
+lend_data %>% 
+  filter(loan_status == "Charged Off") %>% 
+  group_by(grade) %>% 
+  summarise(
+    total_issued    = sum(funded_amnt),
+    total_recoup    = sum(total_pymnt),
+    `simple_diff%`  = (total_recoup/total_issued-1)*100,
+    # APY%_1319 uses the time interval of the whole dataset, ie. throughout LendingClub's entire venture as a P2P lender.
+    `APY%_1319`     = ((total_recoup/total_issued)^(1/t)-1)*100,
+    # APY%_36m uses a 36-month time interval, which is the standard loan term for all loans in the dataset.
+    `APY%_36m`      = ((total_recoup/total_issued)^(1/3)-1)*100
+  )
+```
+
+Comparing the average APR on loans and LC's actual APY, we can see that across the board, LC's APY is always a lot lower than the APR assigned to loan accounts. Fundamentally APY is always lower than APR due to the compounded vs. simple interest calculation (recall that APY is compounded YoY, while APR is simple interest). But there is still additional effects caused by several facts: borrowers could pay off their loan earlier than the issued terms (and thus take advantage of a shorter amortisation schedule with fewer compounding periods) and thus not accrue as much interest, some borrowers default on their loans, and their defaulted amount has to be made up for by those who do not default. 
+
+```{r}
+lend_data %>% 
+  group_by(grade) %>% 
+  summarise(
+    total_issued    = sum(funded_amnt),
+    total_recoup    = sum(total_pymnt),
+    `simple_diff%`  = (total_recoup/total_issued-1)*100,
+    avg_APR         = mean(int_rate),
+    # APY%_1319 uses the time interval of the whole dataset, ie. throughout LendingClub's entire venture as a P2P lender.
+    `APY%_1319`     = ((total_recoup/total_issued)^(1/t)-1)*100,
+    # APY%_36m uses a 36-month time interval, which is the standard loan term for all loans in the dataset.
+    `APY%_36m`      = ((total_recoup/total_issued)^(1/3)-1)*100
+  )
+```
+
+LC's APY by grade and subgrade can be visualised below. On the aggregate, B-grade loans tend to return the most APY-wise (perhaps A-grade loaners repay their loans earlier?), while E-grade loans return the least APY-wise. At more granular subgrade levels, both the highest and lowest rate are within G-grade, with G3 highest and G5 lowest - but this might again be due to the much smaller sample size at the lower end of the credit risk ladder.
+
+```{r}
+p_grade_APY <- lend_data %>% 
+  group_by(grade) %>% 
+  summarise(
+    total_issued    = sum(funded_amnt),
+    total_recoup    = sum(total_pymnt),
+    `simple_diff%`  = (total_recoup/total_issued-1)*100,
+    avg_APR         = mean(int_rate)
+  ) %>% 
+  transmute(
+    grade           = grade,
+    `APY%`          = ((total_recoup/total_issued)^(1/t)-1)*100
+  ) %>% 
+  ggplot(aes(x = grade,
+             y = `APY%`,
+             group = 1
+  ))+
+  geom_point()+
+  geom_line(stat="identity")
+
+p_subgrade_APY <- lend_data %>% 
+  group_by(sub_grade) %>% 
+  summarise(
+    total_issued    = sum(funded_amnt),
+    total_recoup    = sum(total_pymnt),
+    `simple_diff%`  = (total_recoup/total_issued-1)*100,
+    avg_APR         = mean(int_rate)
+  ) %>% 
+  transmute(
+    sub_grade       = sub_grade,
+    `APY%`          = ((total_recoup/total_issued)^(1/t)-1)*100
+  ) %>% 
+  ggplot(aes(x = sub_grade,
+             y = `APY%`,
+             group = 1
+  ))+
+  geom_point()+
+  geom_line(stat="identity")
+
+p_grade_APY / p_subgrade_APY
+```
+
+Knowing what we know about APY and rate of default, we could come to two different conclusions depending on a specific investor's risk appetite. For investors with lower risk tolerance who prioritise lower default rates, the best investment choice is in the prime A-grade loans - otherwise, for investors willing to trade off a small amount of default risk to chase the highest APY, B-grade loans provide a good return on investment compared to the rest. Lower grade loans have higher APR upon issuance, but this is merely sufficient to overcome the much higher rate of default - and thus is not recommended.
+
+##### (v)
+
+Now, we summarise the data to derive the loan purpose, number of loans, number of defaults, rate of defaults, average issued funds, average recouped funds, and real APY assuming a 36-month loan period.
+
+```{r}
+purpose_data <- lend_data %>% 
+  group_by(purpose) %>% 
+  summarise(
+    n_of_loans      = n(),
+    n_default       = sum(loan_status == "Charged Off"),
+    p_default       = sum(loan_status == "Charged Off")/n_of_loans,
+    avg_funded      = mean(funded_amnt),
+    avg_recoup      = mean(total_pymnt),
+    `realAPY_36m`   = ((sum(total_pymnt)/sum(funded_amnt))^(1/3)-1)*100    # avg real APY, assuming 36-month loan
+  ) %>% 
+  arrange(desc(n_of_loans))
+
+purpose_data %>% 
+  tibble()
+```
+
+Below are graphs for the variance between purposes when measuring by aforementioned metrics.
+
+```{r}
+p_purpose_amounts <- purpose_data %>% 
+  select(purpose,
+         `Issued Loan` = avg_funded,
+         `Real Repaid` = avg_recoup) %>% 
+  pivot_longer(
+    cols      = -purpose,
+    names_to  = "type",
+    values_to = "avg_amt"
+  ) %>% 
+  ggplot(
+    aes(
+      x = reorder(purpose,avg_amt),
+      y = avg_amt,
+      col = type,
+      group = purpose
+    )
+  )+
+  geom_line(stat = "identity",
+            col = "black")+
+  geom_point()+
+  coord_flip()+
+  labs(x = "Purpose",
+       y = "Average Loan Amount ($)",
+       col = "",
+       subtitle = "Black line is the average realised interest amount.")
+
+p_purpose_nstatus <- purpose_data %>%
+  transmute(purpose = purpose,
+            default = n_default,
+            paidoff = n_of_loans - n_default) %>%
+  pivot_longer(cols = -purpose,
+               names_to = "loan_status",
+               values_to = "n") %>%
+  ggplot(aes(
+    x = reorder(purpose, n),
+    y = n,
+    fill = loan_status
+  )) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  labs(x = "Purpose",
+       y = "Number of loans",
+       fill = "Loan Status")
+
+p_purpose_defaultrate <- purpose_data %>% 
+  ggplot(aes(
+    x = reorder(purpose,p_default),
+    y = p_default
+  ))+
+  geom_col()+
+  coord_flip()
+
+p_purpose_amounts / p_purpose_nstatus
+```
+
+Loan amounts and default rate appears to vary by purpose: certain purpose categories are much more popular (debt consolidation and credit card debt refinance, arguably two sides of the same coin), and these two categories also sit at the top 3 in average loaned amounts.
+
+When judging purely by default rate, borrowers applying for loans to put towards their business or for moving have the highest rate of default. We are unsure of exactly why this is the case, but we can surmise that small businesses are high-risk ventures, and people borrowing money to move can experience financial instability due to the fact that they have in the process of moving.
+
+```{r}
+p_purpose_defaultrate <- purpose_data %>% 
+  ggplot(aes(
+    x = reorder(purpose,p_default),
+    y = p_default
+  ))+
+  geom_col()+
+  coord_flip()+
+  labs(x = "Purpose",
+       y = "Default Rate")
+
+p_purpose_defaultrate
+```
+
+In terms of APY-based gains for the loan provider, loans provided to pay for a wedding net the largest APY, followed by `renewable_energy`, which we surmise is to pay for the cost of installation for home renewable energy equipment. Note that this might be heavily skewed due to the assumption of a 36-month term - the real term for each loan might differ greatly and so would their realised APY.
+
+```{r}
+p_purpose_APY36m <- purpose_data %>% 
+  ggplot(
+    aes(x = reorder(purpose,realAPY_36m),
+        y = realAPY_36m)
+  )+
+  geom_point()+
+  coord_flip()+
+  labs(x = "Purpose",
+       y = "Real APY (Assuming 36-month term)")
+
+p_purpose_APY36m
+```
+
+As for the relationship between loan purpose and credit risk grade, again some purpose categories have a higher proportion of superprime and prime borrowers than others: credit card refi, auto, home improvement, and debt consolidation all have a much higher proportion of borrowers falling into A and B grade for credit risk.  
+
+```{r}
+lend_data %>% 
+  group_by(purpose,grade) %>% 
+  summarise(n=n(),
+            is_prime = sum(grade %in% c("A","B"))) %>%     # conditional count (for sorting criterion in ggplot2 aes)
+  mutate(purpose_prime_prop = sum(is_prime)/sum(n)) %>%  # proportion of primes for each purpose group, here taking advantage of dplyr's group peeling behaviour.
+  ggplot(
+    aes(
+      x = reorder(purpose,purpose_prime_prop),
+      y = n,
+      fill = grade
+    )
+  )+
+  geom_col(position = "fill")+
+  coord_flip()
 ```
 
 
-##### (v)
 ##### (vi)
+
+Now we consider some borrower characteristics. The plots below chart the relationship between employment length `emp_length` versus `grade`, `loan_status`, and actual return calculated monthly (monthly rate), here assigned as ``actual_mrate%``.
+
+As an example, we look at `emp_length`, `income`, and 
+
+```{r}
+df_emp_length <- lend_data %>% 
+  transmute(
+    # Changing string value of employment length for easy sorting.
+    emp_length     = case_when(emp_length == "10+ years" ~ "More than 10yrs",
+                               T ~ emp_length),
+    grade          = grade,
+    loan_status    = loan_status,
+    # Calculating actual loan interval (from issuance to full repayment) by months.
+    actual_months  = (interval(ymd(issue_d), paste(last_pymnt_d,"-01",sep="") %>% myd()) %/% months(1)),
+    # Calculating actual monthly rate.
+    funded_amnt    = funded_amnt,
+    total_pymnt    = total_pymnt, 
+    actual_mrate   = ((total_pymnt/funded_amnt)^(1/actual_months)-1),
+    actual_APR     = ((1+actual_mrate)^12-1)*100
+  )
+```
+
+Most borrowers have more than 10 years' worth of employment, and the default rate decreases as employment length increases, signifying that borrowers with a longer employment length are less likely to default on their loan. Those for whom employment information is n/a tend to have the highest rate of default.
+Grade-wise, the longer the borrowers' employment history, the more likely they are to be assigned a prime A/B grade. N/A cases have the highest proportion of lower (C and below) grades, and tend to borrow less money than those who do provide employment length information.
+
+
+```{r}
+p1 <- df_emp_length %>%
+  ggplot() +
+  geom_bar(aes(x = emp_length,
+               fill = loan_status)) +
+  coord_flip() +
+  labs(y = "No. of loans")
+
+p2 <- df_emp_length %>%
+  group_by(emp_length,loan_status) %>% 
+  summarise(n=n()) %>% 
+  mutate(prop = n/sum(n)) %>% 
+  filter(loan_status == "Charged Off") %>% 
+  ggplot() +
+  geom_col(aes(x = emp_length,
+               y = prop)) +
+  coord_flip() +
+  labs(y = "Default Proportions")
+
+p1/p2
+```
+
+```{r}
+p3 <- df_emp_length %>%
+  ggplot() +
+  geom_bar(aes(x = emp_length,
+               fill = grade),
+           position = "fill") +
+  coord_flip() +
+  labs(y = "Per-Grade Proportion")
+
+p4 <- df_emp_length %>%
+  ggplot() +
+  geom_density_ridges(aes(y = emp_length,
+                          x = funded_amnt),
+                      quantile_lines = T)+
+  labs(x = "Funded Loan Amount")
+
+p3/p4
+```
+
+For real returns, LC's APY from lending money increases on the aggregate as the `emp_length` variable increases. Those with missing data (potentially unemployed, or student - both of which are less financially stable groups) nets LC the lowest actual return rate.
+
+```{r}
+df_emp_length %>% 
+  group_by(emp_length) %>% 
+  summarise(
+    actual_APY   = ((sum(total_pymnt)/sum(funded_amnt))^(1/t)-1)
+  ) %>% 
+  ggplot(
+    aes(
+      x = emp_length,
+      y = actual_APY
+    )
+  )+
+  geom_point()+
+  ylim(0.0075,0.013)+
+  coord_flip()
+```
+
+
+For `income`, in order to account for very high earners acting as outliers making visualisations hard to see, we stratify the income data into 10 deciles.
+
+```{r}
+df_inc <- lend_data %>% 
+  transmute(
+    # Changing string value of employment length for easy sorting.
+    income         = annual_inc,
+    inc_strata     = ntile(income,10),
+    grade          = grade,
+    loan_status    = loan_status,
+    # Calculating actual loan interval (from issuance to full repayment) by months.
+    actual_months  = (interval(ymd(issue_d), paste(last_pymnt_d,"-01",sep="") %>% myd()) %/% months(1)),
+    # Calculating actual monthly rate.
+    funded_amnt    = funded_amnt,
+    total_pymnt    = total_pymnt, 
+    actual_mrate   = ((total_pymnt/funded_amnt)^(1/actual_months)-1),
+    actual_APY     = ((1+actual_mrate)^12-1)*100
+  )
+```
+
+Income here correlates with default rates pretty well - as we go up the deciles, default rates fall consistently. 
+Unsurprisingly, income decile also correlates with credit risk grade - higher income deciles have higher proportions of good grades. The distribution of loan amount stratified by income, however, is interesting: lower income deciles, as expected, apply to borrow less money than their higher-income counterparts, but higher income deciles have more variety in the amount loaned.
+
+```{r}
+df_inc %>%
+  ggplot() +
+  geom_bar(aes(x = as.factor(inc_strata),
+               fill = loan_status),
+           position = "fill") +
+  coord_flip() +
+  labs(y = "Default Proportions",
+       x = "Income decile")
+
+```
+
+```{r}
+p3 <- df_inc %>%
+  ggplot() +
+  geom_bar(aes(x = as.factor(inc_strata),
+               fill = grade),
+           position = "fill") +
+  coord_flip() +
+  labs(y = "Per-Grade Proportion",
+       x = "Income decile")
+
+p4 <- df_inc %>%
+  ggplot() +
+  geom_density_ridges(aes(y = as.factor(inc_strata),
+                          x = funded_amnt),
+                      quantile_lines = T)+
+  labs(x = "Funded Loan Amount",
+       y = "Income decile")
+
+p3/p4
+```
+Generally, higher income strata for the borrower is generally correlated with higher APY for the lender. This relationship is not absolute - which is likely to be somewhat related to our earlier observation that the very top superprime A-grade (whose proportion is greatest in the 10th decile) borrowers actually net less money for the lender than the prime B-grades.
+
+```{r}
+df_inc %>% 
+  group_by(inc_strata) %>% 
+  summarise(
+    actual_APY = ((sum(total_pymnt)/sum(funded_amnt))^(1/t)-1)
+  ) %>% 
+  ggplot(
+    aes(
+      x = as.factor(inc_strata),
+      y = actual_APY
+    )
+  )+
+  geom_point()+
+  ylim(0.01,0.013)+
+  coord_flip()
+```
+
 ##### (vii)
+
+The first derivative variable that comes to mind is the debt-to-income ratio for the specific loan being considered: in that we hypothesise that the larger an applicant's loan is compared to their annual income, the more likely that they would default. In the section below we derive this attribute, and then perform exploratory analysis to see if this first second-order attribute is robust to our hypothesis.
+
+```{r}
+lend_data %>% 
+  transmute(
+    loan_status       = loan_status,
+    loan_to_inc_ratio = loan_amnt/annual_inc,
+    ratio_deciles     = ntile(loan_to_inc_ratio,10)
+  ) %>% 
+  group_by(ratio_deciles,loan_status) %>% 
+  summarise(
+    n=n()
+  ) %>% 
+  mutate(prop = n/sum(n)) %>% 
+  filter(loan_status=="Charged Off") %>% 
+  ggplot(
+    aes(
+      x = ratio_deciles,
+      y = prop
+    )
+  )+
+  geom_col()
+```
+
+As expected, higher debt-to-income ratio deciles are correlated with a higher rate of default. This can be a good attribute for predicting default.
+
+
+
+```{r}
+lend_data %>% group_by(term) %>% summarise()
+```
+
 
 #### (b)
 #### (c)
