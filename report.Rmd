@@ -32,7 +32,7 @@ lend_data <- read_csv("lcData100K/lcData100K.csv")
 
 #### (a)
 
-\#\#\#\#\#(i)
+##### (i)
 
 Out of all instances, 13.79% defaulted on their loan, while 86.21% fully paid off.
 
