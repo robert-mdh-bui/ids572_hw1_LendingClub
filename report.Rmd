@@ -216,7 +216,7 @@ fully_paid_ridgeline <- fully_paid %>%
        y = "Actual Term (months)")
 ```
 
-Interestingly enough, the actual term (among fully repaid loans) do not differ drastically between loan grades. The median and first-quartile line (Q1) for actual loan term gently decrease from grade A to E, with F and G having a fair bit more variance, once again likely due to the much smaller sample size. Interestingly, the third-quartile line (Q3) lines up almost perfectly at 36-month for all loan grades - and this is also where all the peaks are in the density plots grade-wise. We surmise that this is due to the fact that 36-month loan terms are highly common for loans at this level.
+Interestingly enough, the actual term (among fully repaid loans) do not differ drastically between loan grades. The median and first-quartile line (Q1) for actual loan term gently decrease from grade A to E, with F and G having a fair bit more variance, once again likely due to the much smaller sample size. The third-quartile line (Q3) lines up almost perfectly at 36-month for all loan grades - and this is also where all the peaks are in the density plots grade-wise. We surmise that this is due to the fact that 36-month loan terms is standard for loans at this level - and any occurrence of real term post the 36-month line would be from people who failed to keep up with the original amortisation schedule and had to renegotiate for a longer payment plan.
 
 ```{r}
 fully_paid_tukey | fully_paid_ridgeline
@@ -613,7 +613,6 @@ p2 <- df_emp_length %>%
 
 p1/p2
 ```
-
 ```{r}
 p3 <- df_emp_length %>%
   ggplot() +
@@ -635,7 +634,44 @@ p4 <- df_emp_length %>%
 p3/p4
 ```
 
-For real returns, LC's APY from lending money increases on the aggregate as the `emp_length` variable increases. Those with missing data (potentially unemployed, or student - both of which are less financially stable groups) nets LC the lowest actual return rate.
+For real returns, LC's APY from lending money increases on the aggregate as the `emp_length` variable increases. Those with missing data (potentially unemployed, or student - both of which are less financially stable groups) nets LC the lowest actual return rate when taken at aggregate. However, when separated by loan status, that same group with no employment information nets the highest APY when able to repay their loans (higher APR?) and loses LC the least APY when unable to repay their loans. We are unsure as to why this is the case, but given the much higher rate of default in this group, the increased APY from "Fully Paid" in this specific group is barely able to counteract the losses from defaults. Overall, the rough positive correlation between employment length and LC's profit rate still stands on the aggregate.
+
+```{r fig.height=6, fig.width=9}
+df_emp_length %>% 
+  group_by(emp_length) %>% 
+  summarise(
+    actual_APY   = ((sum(total_pymnt)/sum(funded_amnt))^(1/t)-1)*100,
+    n = n()
+  ) %>% 
+  transmute(
+    emp_length = emp_length,
+    loan_status = "All",
+    actual_APY = actual_APY,
+    n = n
+  ) %>% 
+  rbind(
+    df_emp_length %>%
+      group_by(emp_length, loan_status) %>%
+      summarise(actual_APY = ((sum(total_pymnt) / sum(funded_amnt)) ^ (1/t) - 1)*100,
+                n = n())
+  ) %>% 
+  arrange(desc(emp_length))%>% 
+  ggplot(
+    aes(
+      x = emp_length,
+      y = actual_APY,
+      col = loan_status,
+      size = n
+    )
+  )+
+  geom_point()+
+  coord_flip()+ 
+  facet_wrap(~loan_status,
+             scales = "free",
+             ncol=1)
+```
+
+Here is a separated plot for the aggregate as discussed in the previous paragraph.
 
 ```{r}
 df_emp_length %>% 
@@ -730,7 +766,8 @@ df_inc %>%
   )+
   geom_point()+
   ylim(0.01,0.013)+
-  coord_flip()
+  coord_flip()+
+  labs(x = "Income decile")
 ```
 
 ##### (vii)
@@ -764,9 +801,58 @@ lend_data %>%
 
 As expected, higher debt-to-income ratio deciles are mostly correlated with a higher rate of default. This can be a good attribute for predicting default.
 
+In the same category, we can derive a ratio of monthly income (which can be determined from annual income) divided by the payment installment. The logic here is that the smaller the installment compared to the borrower's income, the more likely it is for the borrower to be able to repay in full. While this might seem similar to the above loan-to-income ratio, this metric also takes the interest into account, as every monthly payment is paying down the interest as well as the principal.
+
 ```{r}
-lend_data %>% group_by(term) %>% summarise()
+lend_data %>%
+  transmute(ratio = installment / (annual_inc / 12),
+            ratio_deciles = ntile(ratio,10),
+            loan_status = loan_status) %>% 
+  group_by(ratio_deciles,loan_status) %>% 
+  summarise(
+    n=n()
+  ) %>% 
+  mutate(prop = n/sum(n)) %>% 
+  filter(loan_status=="Charged Off") %>% 
+  ggplot(
+    aes(
+      x = as.factor(ratio_deciles),
+      y = prop
+    )
+  )+
+  coord_flip()+
+  geom_col()+
+  labs(x = "Monthly Payment-to-Income Ratio Decile",
+       y = "Default Rate")
+  
 ```
+
+Another way to gauge the creditworthiness of a borrower is to determine the proportion of their open accounts deemed 'satisfactory', denoted as `num_sats` in the data frame, when compared to the total amount of open revolving accounts `num_rev_accts`. The only concern with defining this ratio as `num_sats/num_rev_accts` is that the divisor might be 0 (for borrowers with no accounts), but fortunately the dataset does not include any borrower with no revolving accounts. At any rate, we would advise against approving a loan for somebody with no revolving accounts, which denotes an individual with zero credit history.
+
+```{r}
+lend_data %>% 
+  transmute(ratio = num_sats/num_rev_accts,
+            ratio_deciles = ntile(ratio,10),
+            loan_status = loan_status) %>% 
+  group_by(ratio_deciles,loan_status) %>% 
+  summarise(
+    n=n()
+  ) %>% 
+  mutate(prop = n/sum(n)) %>% 
+  filter(loan_status=="Charged Off") %>% 
+  ggplot(
+    aes(
+      x = as.factor(ratio_deciles),
+      y = prop
+    )
+  )+
+  coord_flip()+
+  geom_col()+
+  labs(x = "Satisfactory Account Proportion Decile",
+       y = "Default Rate")
+```
+
+Strangely, from this data it would appear that the higher the ratio between satisfactory to total no. of revolving account is, the higher the default rate - which is counterintuitive to our assumption that the more satisfactory account an individual has, the more likely they are to also satisfy the amortisation schedule of LC's loan. This is an interesting relationship, but given this unexpected outcome, we can conclude that it would be better to evaluate the number of accounts separately rather than as a ratio, as there might be information loss due to the dimensionality reduction process of combining two constituent data columns into one ratio-based component.
 
 #### (b)
 
@@ -795,15 +881,30 @@ There are many columns with 100% NAs - which we surmise are data that has been r
 
 -   Information. Using the codebook .xlsx file, we can determine what exactly each column is measuring. For columns with information that we can intuitively deem irrelevant, or very little information (perhaps columns with only a few values), we will remove the entire column.
 
--   Dependency. Some columns are NA because they are weak entities that depend on other datapoints - for example, \`monthsSinceLastDelinquency\` may be NA for someone without delinquencies. For cases where we can determine a lack of delinquencies, we could replace NAs with 0.
+-   Dependency. Some columns are NA because they are weak entities that depend on other datapoints - for example, `monthsSinceLastDelinquency` may be NA for someone without delinquencies. For cases where we can determine a lack of delinquencies, we could replace NAs with 0.
 
 -   Documentation. If we cannot determine what a data column is (data set to codebook mismatch), we cannot with confidence determine that the column does not cause leakage, and therefore cannot include such columns in the data.frame going into the modeling process.
 
-To speed up this determination process in Phase B, we also save the above table as a csv.
+To speed up this determination process in Phase B, we also save the above table as a csv after joining it with a copy of our codebook.
 
 ```{r}
-write_csv(col_na_summary,"lcData100K/col_na_summary.csv")
+cbook_proc <- read_csv("lcData100K/codebook_w_leakage.csv") %>% 
+  select(column_name=LoanStatNew,Leakage,Description)%>% 
+  right_join(col_na_summary) %>% 
+  select(column_name,prop_na,leakage=Leakage,desc=Description) 
+
+cbook_proc %>% 
+  write_csv("lcData100K/cbook_w_na_leak.csv")
 ```
+
+```{r include=FALSE, eval=FALSE}
+cbook_proc %>%
+  mutate(usable = case_when(leakage == 1 ~ F,
+                            prop_na >= .9 ~ F,
+                            T ~ T)) %>%
+  write_csv("lcData100K/cbook_scratch.csv")
+```
+
 
 ### Q. 3
 
